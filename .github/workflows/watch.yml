@@ -1,0 +1,42 @@
+name: job-watcher
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # GitHub may delay; each run loops 5 checks 60s apart
+  workflow_dispatch:
+
+concurrency:
+  group: watcher
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore state
+        uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: state-${{ github.run_id }}
+          restore-keys: |
+            state-
+
+      - name: Run watcher (5 checks, 60s apart)
+        env:
+          NTFY_TOPIC_AMAZON: ${{ secrets.NTFY_TOPIC_AMAZON }}
+          NTFY_TOPIC_AGENCY: ${{ secrets.NTFY_TOPIC_AGENCY }}
+          NTFY_TOPIC_OTHER: ${{ secrets.NTFY_TOPIC_OTHER }}
+        run: python3 watcher.py --loop 5
+
+      - name: Save state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state.json
+          key: state-${{ github.run_id }}
