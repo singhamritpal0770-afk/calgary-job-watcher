@@ -5,7 +5,6 @@ Monitors several sources for new jobs in the Calgary area and pushes a
 phone alert via ntfy.sh the moment one appears:
 
   - Amazon  : hiring.amazon.ca GraphQL API (checked every run / 60s)
-  - Randstad: randstad.ca Calgary warehouse/industrial (every 5th run)
   - Sysco   : careers.sysco.ca (Radancy) Calgary/Rocky View (every 5th run)
   - YYC     : yyc.careers Calgary Airport Authority board (every 5th run)
   - Job Bank: jobbank.gc.ca "warehouse Calgary" + "airport Calgary"
@@ -17,7 +16,10 @@ state.json is persisted between runs with actions/cache.
 
 ntfy topics are read from the environment (set as repo secrets — this repo
 is public, so they must never be hardcoded here):
-    NTFY_TOPIC_AMAZON, NTFY_TOPIC_AGENCY, NTFY_TOPIC_OTHER
+    NTFY_TOPIC_AMAZON, NTFY_TOPIC_OTHER
+
+A run that starts with no memory (first run / lost cache) records every job
+it sees WITHOUT alerting, so the phone is never spammed with old postings.
 
 Manual use:
     python3 watcher.py               # one check
@@ -60,18 +62,9 @@ AMAZON_URL = "https://hiring.amazon.ca/app#/jobSearch"
 # Phone push via https://ntfy.sh — topic names come from repo secrets.
 NTFY_ENABLED = True
 NTFY_TOPIC_AMAZON = os.environ.get("NTFY_TOPIC_AMAZON", "")
-NTFY_TOPIC_AGENCY = os.environ.get("NTFY_TOPIC_AGENCY", "")
 NTFY_TOPIC_OTHER = os.environ.get("NTFY_TOPIC_OTHER", "")
 
-# A job goes to the agency channel if it comes from an agency source or the
-# poster's company name looks like a staffing agency
-AGENCY_SOURCES = {"randstad"}
-AGENCY_COMPANY_HINTS = ("randstad", "adecco", "manpower", "workforce", "staffing",
-                        "personnel", "recruit", "employment", "talent",
-                        "peopleready", "people ready", "labour ready", "agency",
-                        "is2", "aerotek", "express employment")
-
-FORGET_AFTER_HOURS = 24      # re-alert if a job vanishes then reappears
+FORGET_AFTER_HOURS = 72      # re-alert only if a job vanishes this long
 FAIL_ALERT_THRESHOLD = 30    # warn once after this many consecutive failures
 
 AMAZON_QUERY = (
@@ -253,61 +246,9 @@ def fetch_jobbank():
     return list(jobs.values())
 
 
-def fetch_randstad():
-    payload = {
-        "data": {
-            "currentRoute": {"routeName": "search"},
-            "currentLanguage": "en",
-            "searchParams": {"query": "warehouse", "city": "calgary",
-                             "region": "alberta"},
-            "cookies": {},
-        }
-    }
-    body = http_get(
-        "https://www.randstad.ca/api/search/search-results",
-        headers={"Content-Type": "application/json",
-                 "Origin": "https://www.randstad.ca",
-                 "Referer": "https://www.randstad.ca/jobs/q-warehouse/calgary-alberta/"},
-        data=json.dumps(payload).encode(),
-    )
-    hits = json.loads(body)["searchResults"]["hits"]["hits"]
-    jobs = []
-    for h in hits:
-        s = h["_source"]
-        ji = s.get("JobInformation") or {}
-        jl = s.get("JobLocation") or {}
-        sal = s.get("Salary") or {}
-        bx = s.get("BlueXSanitized") or {}
-        title = (ji.get("Title") or "").strip()
-        city = (jl.get("City") or "").strip()
-        if not title or not in_area(city):
-            continue
-        if not any(k in title.lower() for k in RELEVANT):
-            continue
-        pay = ""
-        try:
-            smin, smax = sal.get("SalaryMin"), sal.get("SalaryMax")
-            if smin and float(smin) > 0:
-                pay = f"${smin}" + (f"-${smax}" if smax and smax != smin else "") + "/hr"
-        except (TypeError, ValueError):
-            pass
-        jid = str((s.get("BlueXJobData") or {}).get("JobId") or h.get("_id"))
-        jobs.append({
-            "id": jid,
-            "title": title,
-            "company": "Randstad Canada",
-            "location": f"{city}, AB",
-            "pay": pay,
-            "url": (f"https://www.randstad.ca/jobs/"
-                    f"{bx.get('Title', 'job')}_{bx.get('City', 'calgary')}_{jid}/"),
-        })
-    return jobs
-
-
 # name -> (fetcher, run every N runs). Amazon every run; boards every 5th.
 SOURCES = {
     "amazon": (fetch_amazon, 1),
-    "randstad": (fetch_randstad, 5),
     "sysco": (fetch_sysco, 5),
     "yyc": (fetch_yyc, 5),
     "jobbank": (fetch_jobbank, 5),
@@ -315,16 +256,10 @@ SOURCES = {
 
 SOURCE_LABELS = {
     "amazon": "Amazon (hiring.amazon.ca)",
-    "randstad": "Randstad Canada (Calgary warehouse / industrial)",
     "sysco": "Sysco Canada (Calgary / Rocky View)",
     "yyc": "Calgary Airport Authority (yyc.careers)",
     "jobbank": "Job Bank Canada (warehouse + airport, Calgary)",
 }
-
-
-def is_agency(job):
-    return (job.get("source") in AGENCY_SOURCES
-            or any(k in job.get("company", "").lower() for k in AGENCY_COMPANY_HINTS))
 
 
 # ---------------------------------------------------------------- alerts
@@ -366,13 +301,11 @@ def describe(job):
 
 
 def alert(new_jobs, topic, kind):
-    """kind is 'Amazon', 'Agency' or 'Calgary' — keeps alert channels distinct."""
+    """kind is 'Amazon' or 'Calgary' — keeps the two alert channels distinct."""
     n = len(new_jobs)
     plural = "s" if n > 1 else ""
     if kind == "Amazon":
         title = f"🚨 AMAZON — {n} new job{plural} near Calgary!"
-    elif kind == "Agency":
-        title = f"🏢 AGENCY — {n} new Calgary job{plural} ({new_jobs[0]['company']}…)"
     else:
         by_src = {}
         for j in new_jobs:
@@ -450,6 +383,9 @@ def run_once(force=False):
     cutoff = now - datetime.timedelta(hours=FORGET_AFTER_HOURS)
 
     seen = state.setdefault("seen", {})
+    # No memory at all means first run or lost cache: record everything
+    # silently instead of spamming the phone with already-posted jobs.
+    baseline = not seen
     current = state.setdefault("current", {})
     failures = state.setdefault("failures", {})
     last_checked = state.setdefault("last_checked", {})
@@ -498,22 +434,20 @@ def run_once(force=False):
 
     write_dashboard(state)
 
-    if new_jobs:
+    if new_jobs and baseline:
+        log(f"Baseline run — recorded {len(new_jobs)} existing jobs WITHOUT alerting.")
+    elif new_jobs:
         for j in new_jobs:
             log(f"NEW [{j['source']}]: {describe(j)} ({j['url']})")
         amazon_new = [j for j in new_jobs if j["source"] == "amazon"]
-        agency_new = [j for j in new_jobs if j["source"] != "amazon" and is_agency(j)]
-        other_new = [j for j in new_jobs
-                     if j["source"] != "amazon" and not is_agency(j)]
+        other_new = [j for j in new_jobs if j["source"] != "amazon"]
         if amazon_new:
             alert(amazon_new, NTFY_TOPIC_AMAZON, "Amazon")
-        if agency_new:
-            alert(agency_new, NTFY_TOPIC_AGENCY, "Agency")
         if other_new:
             alert(other_new, NTFY_TOPIC_OTHER, "Calgary")
         if IS_MAC:
-            # open the most urgent group exactly once: Amazon > agency > rest
-            prio = amazon_new or agency_new or other_new
+            # open the most urgent group exactly once: Amazon first
+            prio = amazon_new or other_new
             if len(prio) == 1:
                 target = prio[0]["url"]
             else:

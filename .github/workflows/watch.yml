@@ -30,7 +30,6 @@ jobs:
       - name: Run watcher (5 checks, 60s apart)
         env:
           NTFY_TOPIC_AMAZON: ${{ secrets.NTFY_TOPIC_AMAZON }}
-          NTFY_TOPIC_AGENCY: ${{ secrets.NTFY_TOPIC_AGENCY }}
           NTFY_TOPIC_OTHER: ${{ secrets.NTFY_TOPIC_OTHER }}
         run: python3 watcher.py --loop 5
 
