@@ -235,6 +235,8 @@ def fetch_jobbank():
             if not in_area(loc):
                 continue
             title_l = strip_tags(m_title.group(1)).lower()
+            if "laboratory" in title_l:   # "labor" must not match "laboratory"
+                continue
             if not any(k in title_l for k in RELEVANT):
                 continue
             jid = m_id.group(1)
