@@ -1,7 +1,8 @@
 # Calgary job watcher (cloud)
 
-Watches Sysco, YYC airport and Job Bank for new warehouse-type jobs around
-Calgary and sends instant phone pushes via [ntfy.sh](https://ntfy.sh).
+Watches official employer career sites — Sysco, YYC airport, Walmart Canada
+and Canadian Tire — for new warehouse-type jobs around Calgary and sends
+instant phone pushes via [ntfy.sh](https://ntfy.sh).
 
 Runs on GitHub Actions: a scheduled workflow fires every ~5–15 minutes and
 checks every source once per run. Amazon (hiring.amazon.ca) is not watched

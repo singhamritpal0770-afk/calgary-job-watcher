@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Calgary warehouse job watcher — cloud edition (GitHub Actions).
 
-Monitors several sources for new jobs in the Calgary area and pushes a
-phone alert via ntfy.sh the moment one appears:
+Monitors official employer career sites for new jobs in the Calgary area
+and pushes a phone alert via ntfy.sh the moment one appears:
 
-  - Sysco   : careers.sysco.ca (Radancy) Calgary/Rocky View
-  - YYC     : yyc.careers Calgary Airport Authority board
-  - Job Bank: jobbank.gc.ca "warehouse Calgary" + "airport Calgary"
-              — catches most other Calgary employers
+  - Sysco        : careers.sysco.ca (Radancy) Calgary/Rocky View
+  - YYC          : yyc.careers Calgary Airport Authority board
+  - Walmart      : careers.walmart.ca (Radancy) distribution/warehouse
+  - Canadian Tire: Workday board, Calgary warehouse-type roles
 
 Amazon (hiring.amazon.ca) is NOT watched from here: its WAF 403-blocks
 cloud runner IPs, so a companion watcher on a residential connection
@@ -20,8 +20,9 @@ ntfy topics are read from the environment (set as repo secrets — this repo
 is public, so they must never be hardcoded here):
     NTFY_TOPIC_AMAZON, NTFY_TOPIC_OTHER
 
-A run that starts with no memory (first run / lost cache) records every job
-it sees WITHOUT alerting, so the phone is never spammed with old postings.
+A source with no recorded memory (first run, newly added source, or a lost
+cache) gets its current jobs recorded WITHOUT alerting, so the phone is
+never spammed with postings that were already up.
 
 Manual use:
     python3 watcher.py               # one check
@@ -206,8 +207,8 @@ def fetch_yyc():
     return list({j["id"]: j for j in jobs}.values())
 
 
-# Job Bank keyword searches match loosely, so keep only jobs whose title
-# looks warehouse- or airport-related
+# Broad boards match loosely, so keep only jobs whose title looks
+# warehouse- or airport-related
 RELEVANT = ("warehouse", "picker", "forklift", "shipper", "receiver", "selector",
             "material handler", "loader", "packag", "packer", "distribution",
             "inventory", "freight", "shipping", "dock", "labour", "labor",
@@ -216,40 +217,84 @@ RELEVANT = ("warehouse", "picker", "forklift", "shipper", "receiver", "selector"
             "production", "yard", "machine operator", "general help")
 
 
-def fetch_jobbank():
+def relevant_title(title):
+    t = title.lower()
+    if "laboratory" in t:   # "labor" must not match "laboratory"
+        return False
+    return any(k in t for k in RELEVANT)
+
+
+def fetch_walmart():
+    # Same Radancy platform as Sysco; location params are ignored, so search
+    # by keyword and keep only Calgary-area city slugs from the job URL.
     jobs = {}
-    for keywords in ("warehouse Calgary", "airport Calgary"):
-        qs = urllib.parse.urlencode({"searchstring": keywords, "sort": "D"})
-        # jobbank.gc.ca answers slowly from non-Canadian cloud IPs
-        body = http_get(f"https://www.jobbank.gc.ca/jobsearch/jobsearch?{qs}",
-                        timeout=100)
-        for article in re.split(r"<article", body)[1:]:
-            m_id = re.search(r'href="/jobsearch/jobposting/(\d+)', article)
-            m_title = re.search(r'<span class="noctitle">\s*(.*?)\s*</span>', article, re.S)
-            m_biz = re.search(r'<li class="business">\s*(.*?)\s*</li>', article, re.S)
-            m_loc = re.search(r'<li class="location">(.*?)</li>', article, re.S)
-            m_sal = re.search(r'<li class="salary">(.*?)</li>', article, re.S)
-            if not (m_id and m_title and m_loc):
+    for kw in ("distribution", "warehouse"):
+        qs = urllib.parse.urlencode({
+            "ActiveFacetID": 0, "CurrentPage": 1, "RecordsPerPage": 200,
+            "SearchResultsModuleName": "Search Results",
+            "SearchFiltersModuleName": "Search Filters",
+            "SortCriteria": 0, "SortDirection": 0, "SearchType": 5,
+            "Keywords": kw,
+        })
+        body = http_get(f"https://careers.walmart.ca/search-jobs/results?{qs}",
+                        headers={"Accept": "application/json"})
+        results = json.loads(body).get("results", "")
+        for url, title in re.findall(
+                r'href="(/job/[^"]+)"[^>]*>\s*<h2[^>]*>([^<]+)</h2>', results):
+            city_slug = url.split("/")[2]
+            if not in_area(city_slug.replace("-", " ")):
                 continue
-            loc = strip_tags(m_loc.group(1)).replace("Location", "").strip()
-            if not in_area(loc):
+            title = unescape(title).strip()
+            if not relevant_title(title):
                 continue
-            title_l = strip_tags(m_title.group(1)).lower()
-            if "laboratory" in title_l:   # "labor" must not match "laboratory"
-                continue
-            if not any(k in title_l for k in RELEVANT):
-                continue
-            jid = m_id.group(1)
-            sal = strip_tags(m_sal.group(1)).replace("Salary:", "").strip() if m_sal else ""
+            jid = url.rstrip("/").split("/")[-1]
             jobs[jid] = {
                 "id": jid,
-                "title": strip_tags(m_title.group(1)),
-                "company": strip_tags(m_biz.group(1)) if m_biz else "?",
-                "location": loc,
-                "pay": sal,
-                "url": f"https://www.jobbank.gc.ca/jobsearch/jobposting/{jid}",
+                "title": title,
+                "company": "Walmart Canada",
+                "location": city_slug.replace("-", " ").title() + ", AB",
+                "pay": "",
+                "url": "https://careers.walmart.ca" + url,
             }
     return list(jobs.values())
+
+
+def fetch_cantire():
+    # Workday CXS API; pages are capped at 20 postings per request.
+    base = ("https://canadiantirecorporation.wd3.myworkdayjobs.com"
+            "/wday/cxs/canadiantirecorporation/Enterprise_External_Careers_Site")
+    jobs, offset, total = [], 0, 1
+    while offset < min(total, 100):
+        payload = {"appliedFacets": {}, "limit": 20, "offset": offset,
+                   "searchText": "Calgary"}
+        body = http_get(f"{base}/jobs",
+                        headers={"Content-Type": "application/json",
+                                 "Accept": "application/json"},
+                        data=json.dumps(payload).encode())
+        d = json.loads(body)
+        total = d.get("total", 0)
+        postings = d.get("jobPostings", [])
+        if not postings:
+            break
+        for p in postings:
+            title = (p.get("title") or "").strip()
+            loc = p.get("locationsText") or ""
+            path = p.get("externalPath") or ""
+            if not title or not path or not in_area(loc):
+                continue
+            if not relevant_title(title):
+                continue
+            jobs.append({
+                "id": path.rsplit("_", 1)[-1] or path,
+                "title": title,
+                "company": "Canadian Tire",
+                "location": loc,
+                "pay": "",
+                "url": ("https://canadiantirecorporation.wd3.myworkdayjobs.com"
+                        "/en-US/Enterprise_External_Careers_Site" + path),
+            })
+        offset += 20
+    return jobs
 
 
 # name -> (fetcher, run every N runs). No Amazon here: its WAF 403-blocks
@@ -257,13 +302,15 @@ def fetch_jobbank():
 SOURCES = {
     "sysco": (fetch_sysco, 1),
     "yyc": (fetch_yyc, 1),
-    "jobbank": (fetch_jobbank, 1),
+    "walmart": (fetch_walmart, 1),
+    "cantire": (fetch_cantire, 1),
 }
 
 SOURCE_LABELS = {
     "sysco": "Sysco Canada (Calgary / Rocky View)",
     "yyc": "Calgary Airport Authority (yyc.careers)",
-    "jobbank": "Job Bank Canada (warehouse + airport, Calgary)",
+    "walmart": "Walmart Canada (Calgary-area distribution / warehouse)",
+    "cantire": "Canadian Tire (Calgary warehouse-type roles)",
 }
 
 
@@ -388,9 +435,7 @@ def run_once(force=False):
     cutoff = now - datetime.timedelta(hours=FORGET_AFTER_HOURS)
 
     seen = state.setdefault("seen", {})
-    # No memory at all means first run or lost cache: record everything
-    # silently instead of spamming the phone with already-posted jobs.
-    baseline = not seen
+    inited = state.setdefault("initialized", {})
     current = state.setdefault("current", {})
     failures = state.setdefault("failures", {})
     last_checked = state.setdefault("last_checked", {})
@@ -415,6 +460,12 @@ def run_once(force=False):
         last_checked[src] = now_iso
         current[src] = jobs
         counts[src] = len(jobs)
+        # A source we have never successfully recorded before gets its
+        # current jobs stored silently — a freshly added source (or a lost
+        # cache) must never re-announce postings that were already up.
+        first_time = (not inited.get(src)
+                      and not any(k.startswith(src + ":") for k in seen))
+        src_new = []
         for job in jobs:
             key = f"{src}:{job['id']}"
             prev = seen.get(key)
@@ -426,11 +477,16 @@ def run_once(force=False):
                     is_new = True
             if is_new:
                 job["source"] = src
-                new_jobs.append(job)
+                src_new.append(job)
                 seen[key] = {"first_seen": now_iso, "last_seen": now_iso,
                              "title": job["title"]}
             else:
                 seen[key]["last_seen"] = now_iso
+        if first_time and src_new:
+            log(f"[{src}] baseline — recorded {len(src_new)} existing jobs WITHOUT alerting.")
+        else:
+            new_jobs.extend(src_new)
+        inited[src] = True
 
     state["seen"] = {
         k: v for k, v in seen.items()
@@ -439,9 +495,7 @@ def run_once(force=False):
 
     write_dashboard(state)
 
-    if new_jobs and baseline:
-        log(f"Baseline run — recorded {len(new_jobs)} existing jobs WITHOUT alerting.")
-    elif new_jobs:
+    if new_jobs:
         for j in new_jobs:
             log(f"NEW [{j['source']}]: {describe(j)} ({j['url']})")
         amazon_new = [j for j in new_jobs if j["source"] == "amazon"]
