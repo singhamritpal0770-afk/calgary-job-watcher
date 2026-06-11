@@ -4,15 +4,17 @@
 Monitors several sources for new jobs in the Calgary area and pushes a
 phone alert via ntfy.sh the moment one appears:
 
-  - Amazon  : hiring.amazon.ca GraphQL API (checked every run / 60s)
-  - Sysco   : careers.sysco.ca (Radancy) Calgary/Rocky View (every 5th run)
-  - YYC     : yyc.careers Calgary Airport Authority board (every 5th run)
+  - Sysco   : careers.sysco.ca (Radancy) Calgary/Rocky View
+  - YYC     : yyc.careers Calgary Airport Authority board
   - Job Bank: jobbank.gc.ca "warehouse Calgary" + "airport Calgary"
-              (every 5th run) — catches most other Calgary employers
+              — catches most other Calgary employers
 
-Runs on a GitHub Actions schedule; each workflow run loops several checks
-60 s apart so coverage stays near-minute despite the 5-minute cron floor.
-state.json is persisted between runs with actions/cache.
+Amazon (hiring.amazon.ca) is NOT watched from here: its WAF 403-blocks
+cloud runner IPs, so a companion watcher on a residential connection
+covers Amazon instead.
+
+Runs on a GitHub Actions schedule (~every 5-15 min); each run checks every
+source once. state.json is persisted between runs with actions/cache.
 
 ntfy topics are read from the environment (set as repo secrets — this repo
 is public, so they must never be hardcoded here):
@@ -218,7 +220,9 @@ def fetch_jobbank():
     jobs = {}
     for keywords in ("warehouse Calgary", "airport Calgary"):
         qs = urllib.parse.urlencode({"searchstring": keywords, "sort": "D"})
-        body = http_get(f"https://www.jobbank.gc.ca/jobsearch/jobsearch?{qs}")
+        # jobbank.gc.ca answers slowly from non-Canadian cloud IPs
+        body = http_get(f"https://www.jobbank.gc.ca/jobsearch/jobsearch?{qs}",
+                        timeout=100)
         for article in re.split(r"<article", body)[1:]:
             m_id = re.search(r'href="/jobsearch/jobposting/(\d+)', article)
             m_title = re.search(r'<span class="noctitle">\s*(.*?)\s*</span>', article, re.S)
@@ -246,16 +250,15 @@ def fetch_jobbank():
     return list(jobs.values())
 
 
-# name -> (fetcher, run every N runs). Amazon every run; boards every 5th.
+# name -> (fetcher, run every N runs). No Amazon here: its WAF 403-blocks
+# cloud runner IPs, so the Mac watcher covers Amazon from a residential IP.
 SOURCES = {
-    "amazon": (fetch_amazon, 1),
-    "sysco": (fetch_sysco, 5),
-    "yyc": (fetch_yyc, 5),
-    "jobbank": (fetch_jobbank, 5),
+    "sysco": (fetch_sysco, 1),
+    "yyc": (fetch_yyc, 1),
+    "jobbank": (fetch_jobbank, 1),
 }
 
 SOURCE_LABELS = {
-    "amazon": "Amazon (hiring.amazon.ca)",
     "sysco": "Sysco Canada (Calgary / Rocky View)",
     "yyc": "Calgary Airport Authority (yyc.careers)",
     "jobbank": "Job Bank Canada (warehouse + airport, Calgary)",
