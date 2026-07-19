@@ -127,7 +127,7 @@ def fetch_amazon():
         "query": AMAZON_QUERY,
     }
     body = http_get(
-        "https://e5mquma77feepi2bdn4d6h3mpu.appsync-api.us-east-1.amazonaws.com/graphql",
+        "https://hiring.amazon.ca/graphql",
         headers={
             "Content-Type": "application/json",
             "Authorization": "Bearer token",
@@ -297,9 +297,12 @@ def fetch_cantire():
     return jobs
 
 
-# name -> (fetcher, run every N runs). No Amazon here: its WAF 403-blocks
-# cloud runner IPs, so the Mac watcher covers Amazon from a residential IP.
+# name -> (fetcher, run every N runs). Amazon moved off AppSync (which
+# 403-blocked cloud runners) to hiring.amazon.ca/graphql in July 2026;
+# the Mac watcher still checks it every 60 s while awake, and the two
+# sides dedupe phone pushes through the ntfy topic history.
 SOURCES = {
+    "amazon": (fetch_amazon, 1),
     "sysco": (fetch_sysco, 1),
     "yyc": (fetch_yyc, 1),
     "walmart": (fetch_walmart, 1),
@@ -307,6 +310,7 @@ SOURCES = {
 }
 
 SOURCE_LABELS = {
+    "amazon": "Amazon (hiring.amazon.ca, 100 km of Calgary)",
     "sysco": "Sysco Canada (Calgary / Rocky View)",
     "yyc": "Calgary Airport Authority (yyc.careers)",
     "walmart": "Walmart Canada (Calgary-area distribution / warehouse)",
@@ -352,8 +356,40 @@ def describe(job):
     return f"{job['title']} — {job['company']}, {job['location']}{pay}"
 
 
+def announced_ids(topic):
+    """Job ids already pushed to this ntfy topic (by us OR the companion
+    watcher) in the forget window — the topic history is the shared state
+    that stops the Mac and the cloud double-alerting the same posting."""
+    try:
+        body = http_get(f"https://ntfy.sh/{topic}/json?poll=1"
+                        f"&since={FORGET_AFTER_HOURS}h", timeout=15)
+    except Exception as e:
+        log(f"ntfy history poll failed ({e}) — pushing without dedupe")
+        return set()
+    ids = set()
+    for line in body.splitlines():
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            continue
+        m = re.search(r"^ref: (.+)$", msg.get("message", ""), re.M)
+        if m:
+            ids.update(m.group(1).split())
+    return ids
+
+
 def alert(new_jobs, topic, kind):
     """kind is 'Amazon' or 'Calgary' — keeps the two alert channels distinct."""
+    if kind == "Amazon" and topic:
+        already = announced_ids(topic)
+        push_jobs = [j for j in new_jobs if str(j["id"]) not in already]
+        if not push_jobs:
+            log(f"[amazon] all {len(new_jobs)} new jobs already announced "
+                "on ntfy by the companion watcher — no push.")
+            osascript_notify("Amazon jobs (already alerted)",
+                             "; ".join(describe(j) for j in new_jobs[:3]))
+            return
+        new_jobs = push_jobs
     n = len(new_jobs)
     plural = "s" if n > 1 else ""
     if kind == "Amazon":
@@ -365,6 +401,8 @@ def alert(new_jobs, topic, kind):
         src_summary = ", ".join(f"{s} ({len(js)})" for s, js in by_src.items())
         title = f"🔔 {n} new Calgary job{plural} — {src_summary}"
     body = "\n".join(describe(j) for j in new_jobs[:5])
+    if kind == "Amazon":
+        body += "\nref: " + " ".join(str(j["id"]) for j in new_jobs[:30])
     osascript_notify(title, "; ".join(describe(j) for j in new_jobs[:3]))
     ntfy_push(title, body, topic, click_url=new_jobs[0].get("url"))
     if IS_MAC:

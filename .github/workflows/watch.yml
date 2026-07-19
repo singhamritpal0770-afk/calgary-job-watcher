@@ -30,6 +30,7 @@ jobs:
       - name: Run watcher
         env:
           NTFY_TOPIC_OTHER: ${{ secrets.NTFY_TOPIC_OTHER }}
+          NTFY_TOPIC_AMAZON: ${{ secrets.NTFY_TOPIC_AMAZON }}
         run: python3 watcher.py
 
       - name: Save state
