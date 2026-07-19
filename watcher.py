@@ -297,12 +297,12 @@ def fetch_cantire():
     return jobs
 
 
-# name -> (fetcher, run every N runs). Amazon moved off AppSync (which
-# 403-blocked cloud runners) to hiring.amazon.ca/graphql in July 2026;
-# the Mac watcher still checks it every 60 s while awake, and the two
-# sides dedupe phone pushes through the ntfy topic history.
+# name -> (fetcher, run every N runs). No Amazon here: even the new
+# hiring.amazon.ca/graphql endpoint (July 2026, replaced AppSync) still
+# 403-blocks cloud runner IPs — verified 2026-07-19. The Mac watcher
+# covers Amazon from a residential IP; fetch_amazon and the ntfy-history
+# dedupe in alert() are kept ready in case that ever changes.
 SOURCES = {
-    "amazon": (fetch_amazon, 1),
     "sysco": (fetch_sysco, 1),
     "yyc": (fetch_yyc, 1),
     "walmart": (fetch_walmart, 1),
@@ -310,7 +310,6 @@ SOURCES = {
 }
 
 SOURCE_LABELS = {
-    "amazon": "Amazon (hiring.amazon.ca, 100 km of Calgary)",
     "sysco": "Sysco Canada (Calgary / Rocky View)",
     "yyc": "Calgary Airport Authority (yyc.careers)",
     "walmart": "Walmart Canada (Calgary-area distribution / warehouse)",
@@ -569,15 +568,21 @@ def main():
 
     force = "--force-all" in sys.argv
     loops = 1
+    sleep_s = 60
     if "--loop" in sys.argv:
         try:
             loops = int(sys.argv[sys.argv.index("--loop") + 1])
         except (IndexError, ValueError):
             loops = 5
+    if "--sleep" in sys.argv:
+        try:
+            sleep_s = int(sys.argv[sys.argv.index("--sleep") + 1])
+        except (IndexError, ValueError):
+            pass
     for i in range(loops):
         run_once(force=force)
         if i < loops - 1:
-            time.sleep(60)
+            time.sleep(sleep_s)
 
 
 def load_state():
