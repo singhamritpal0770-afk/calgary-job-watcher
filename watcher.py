@@ -66,9 +66,6 @@ AMAZON_URL = "https://hiring.amazon.ca/app#/jobSearch"
 NTFY_ENABLED = True
 NTFY_TOPIC_AMAZON = os.environ.get("NTFY_TOPIC_AMAZON", "")
 NTFY_TOPIC_OTHER = os.environ.get("NTFY_TOPIC_OTHER", "")
-# ntfy.sh forwards each alert to this address too (repo secret — this repo
-# is public). Backup channel for when the iPhone ntfy app is unsubscribed.
-NTFY_EMAIL = os.environ.get("NTFY_EMAIL", "")
 
 FORGET_AFTER_HOURS = 72      # re-alert only if a job vanishes this long
 FAIL_ALERT_THRESHOLD = 30    # warn once after this many consecutive failures
@@ -344,8 +341,6 @@ def ntfy_push(title, body, topic, click_url=None):
         # HTTP headers must be latin-1: drop emoji etc. from header values
         safe_title = title.encode("latin-1", errors="ignore").decode("latin-1").strip()
         headers = {"Title": safe_title, "Priority": "urgent", "Tags": "rotating_light"}
-        if NTFY_EMAIL:
-            headers["Email"] = NTFY_EMAIL
         if click_url:
             headers["Click"] = click_url
         req = urllib.request.Request(f"https://ntfy.sh/{topic}",
