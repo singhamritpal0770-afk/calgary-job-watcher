@@ -31,6 +31,7 @@ jobs:
         env:
           NTFY_TOPIC_OTHER: ${{ secrets.NTFY_TOPIC_OTHER }}
           NTFY_TOPIC_AMAZON: ${{ secrets.NTFY_TOPIC_AMAZON }}
+          NTFY_EMAIL: ${{ secrets.NTFY_EMAIL }}
         # GitHub throttles */5 crons to ~hourly in practice, so each run
         # covers a 15-minute window, checking the boards every 5 minutes.
         run: python3 watcher.py --loop 4 --sleep 300
